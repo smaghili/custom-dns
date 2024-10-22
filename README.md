@@ -16,7 +16,6 @@
 در سرور ایران، دستور زیر را اجرا کنید تا تانل SSH بین سرور ایران و سرور خارج برقرار شود:
 
 ```bash
-# اجرا در سرور ایران
 curl -o install.sh https://raw.githubusercontent.com/smaghili/sshtunnel/main/install.sh && chmod +x install.sh && ./install.sh
 ```
 
@@ -24,7 +23,6 @@ curl -o install.sh https://raw.githubusercontent.com/smaghili/sshtunnel/main/ins
 پس از برقراری تانل، در همان سرور ایران دستور زیر را اجرا کنید:
 
 ```bash
-# اجرا در سرور ایران
 curl -o install.sh https://raw.githubusercontent.com/smaghili/custom-dns/main/install.sh && chmod +x install.sh && ./install.sh
 ```
 
@@ -32,7 +30,6 @@ curl -o install.sh https://raw.githubusercontent.com/smaghili/custom-dns/main/in
 در سرور ایران، سرویس DNS را با دستور زیر راه‌اندازی کنید:
 
 ```bash
-# اجرا در سرور ایران
 sudo dns --port 53 --whitelist-file domains.txt --forward-dns "10.202.10.10,37.236.64.218"
 ```
 
@@ -73,7 +70,6 @@ sudo dns --port 53 --whitelist-file domains.txt --forward-dns "10.202.10.10,37.2
 
 مثال:
 ```bash
-# اجرا در سرور ایران
 --forward-dns "10.202.10.10,37.236.64.218,8.8.8.8"
 ```
 
@@ -101,7 +97,6 @@ tail -f /var/log/custom-dns.error.log
 برای تغییر هر یک از تنظیمات (مانند DNS های forward) کافیست در سرور ایران دستور راه‌اندازی را با پارامترهای جدید اجرا کنید:
 
 ```bash
-# اجرا در سرور ایران
 sudo dns --port 53 --whitelist-file domains.txt --forward-dns "10.202.10.10,8.8.8.8"
 ```
 
