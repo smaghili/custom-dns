@@ -2,7 +2,7 @@
 
 # Installation script for DNS service
 INSTALL_DIR="/opt/dns"
-REPO_URL="https://github.com/yourusername/dns-server.git"  # Replace with your actual repo URL
+REPO_URL="https://github.com/smaghili/custom-dns.git"  # Replace with your actual repo URL
 BIN_PATH="/usr/local/bin/dns"
 
 # Check if running as root
