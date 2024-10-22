@@ -58,10 +58,11 @@ Description=Custom DNS Server
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 {os.path.join(INSTALL_DIR, 'dns.py')} {args.port} {os.path.join(INSTALL_DIR, args.whitelist_file)} "{args.forward_dns}" {server_ip}
+ExecStart={sys.executable} {os.path.join(INSTALL_DIR, 'dns.py')} --port {args.port} --whitelist-file {os.path.join(INSTALL_DIR, args.whitelist_file)} --forward-dns "{args.forward_dns}"
 Type=simple
 Restart=always
 WorkingDirectory={INSTALL_DIR}
+User=root
 
 [Install]
 WantedBy=multi-user.target
@@ -105,7 +106,7 @@ class DNSHandler:
         self.address = address
         self.server_ip = server_ip
         self.whitelist = whitelist
-        self.forward_dns_servers = forward_dns_servers
+        self.forward_dns_servers = [dns.strip() for dns in forward_dns_servers.split(',')]
 
     def handle(self):
         try:
@@ -150,7 +151,7 @@ class DNSHandler:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock.settimeout(5)
-                sock.sendto(data, (dns_server, 53))
+                sock.sendto(data, (dns_server.strip(), 53))
                 response, _ = sock.recvfrom(1024)
                 print(f"Forwarded Request: {DNSRecord.parse(data).questions[0].qname} --> {dns_server}")
                 return response
@@ -159,6 +160,38 @@ class DNSHandler:
             finally:
                 sock.close()
         return None
+
+class UDPHandler(BaseRequestHandler):
+    def handle(self):
+        data, socket = self.request
+        handler = DNSHandler(data, socket, self.client_address, args.server_ip, args.whitelist, args.forward_dns)
+        response = handler.handle()
+        if response:
+            socket.sendto(response, self.client_address)
+
+class TCPHandler(BaseRequestHandler):
+    def handle(self):
+        data = self.request.recv(8192)
+        length = int.from_bytes(data[:2], byteorder='big')
+        if len(data) - 2 != length:
+            return
+        handler = DNSHandler(data[2:], self.request, self.client_address, args.server_ip, args.whitelist, args.forward_dns)
+        response = handler.handle()
+        if response:
+            self.request.sendall(len(response).to_bytes(2, byteorder='big') + response)
+
+def run_server(server_class, handler_class):
+    server = server_class(("0.0.0.0", args.port), handler_class)
+    print(f"Starting {server_class.__name__} on port {args.port}...")
+    server.serve_forever()
+
+def read_whitelist(filename):
+    try:
+        with open(filename, 'r') as f:
+            return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    except Exception as e:
+        print(f"Error reading whitelist file: {e}")
+        sys.exit(1)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DNS Server with service management')
@@ -173,7 +206,36 @@ if __name__ == '__main__':
         sys.exit(1)
 
     # Get public IP
-    server_ip = get_public_ip()
-    
-    # Create/update service
-    create_service(args, server_ip)
+    args.server_ip = get_public_ip()
+
+    try:
+        # Check if running as a direct command
+        if os.path.basename(sys.argv[0]) == 'dns' or os.path.basename(sys.argv[0]) == 'dns.py':
+            create_service(args, args.server_ip)
+        else:
+            # Running as a service
+            args.whitelist = read_whitelist(args.whitelist_file)
+            print(f"Starting DNS Server...")
+            print(f"Server IP: {args.server_ip}")
+            print(f"Port: {args.port}")
+            print(f"Forward DNS: {args.forward_dns}")
+            print(f"Whitelist entries: {len(args.whitelist)}")
+            
+            udp_server = ThreadingUDPServer(("0.0.0.0", args.port), UDPHandler)
+            tcp_server = ThreadingTCPServer(("0.0.0.0", args.port), TCPHandler)
+            
+            import threading
+            udp_thread = threading.Thread(target=udp_server.serve_forever)
+            tcp_thread = threading.Thread(target=tcp_server.serve_forever)
+            
+            udp_thread.start()
+            tcp_thread.start()
+            
+            udp_thread.join()
+            tcp_thread.join()
+            
+    except KeyboardInterrupt:
+        print("\nShutting down the server...")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        sys.exit(1)
