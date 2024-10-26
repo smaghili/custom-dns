@@ -71,14 +71,14 @@ def remove_existing_service():
         logging.error(f"Error: {e}")
         return False
 
-def create_service(args, server_ip):
+def create_service(args):
     """Create and start systemd service"""
     service_content = f"""[Unit]
 Description=Custom DNS Server
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 {os.path.join(INSTALL_DIR, 'dns.py')} --port {args.port} --whitelist-file {args.whitelist_file} --forward-dns "{args.forward_dns}"
+ExecStart=/usr/bin/python3 {os.path.join(INSTALL_DIR, 'dns.py')} {f'--ip {args.ip}' if args.ip else ''} --port {args.port} --whitelist-file {args.whitelist_file} --forward-dns "{args.forward_dns}"
 Type=simple
 Restart=on-failure
 RestartSec=5
@@ -111,7 +111,7 @@ WantedBy=multi-user.target
         subprocess.run(["systemctl", "start", SERVICE_NAME], check=True)
         
         print(f"\nDNS Service installed and started successfully!")
-        print(f"Service IP: {server_ip}")
+        print(f"Service IP: {args.server_ip}")
         print(f"Service Port: {args.port}")
         print(f"Forward DNS: {args.forward_dns}")
         print("\nYou can manage the service using:")
@@ -219,6 +219,7 @@ def read_whitelist(filename):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DNS Server with service management')
+    parser.add_argument("--ip", help="set server IP address (optional)", type=str, default=None)
     parser.add_argument("--port", help="set listen port", type=int, default=53)
     parser.add_argument("--whitelist-file", help="file containing whitelisted domains", type=str, required=True)
     parser.add_argument("--forward-dns", help="comma-separated list of forwarding DNS servers", type=str, required=True)
@@ -232,8 +233,13 @@ if __name__ == '__main__':
     # Set up logging
     setup_logging()
 
-    # Get public IP
-    args.server_ip = get_public_ip()
+    # Get IP address (manual or auto-detected)
+    if args.ip:
+        args.server_ip = args.ip
+        logging.info(f"Using provided IP: {args.server_ip}")
+    else:
+        args.server_ip = get_public_ip()
+        logging.info(f"Using auto-detected IP: {args.server_ip}")
 
     try:
         # Check if script is being run directly by systemd
@@ -275,7 +281,7 @@ if __name__ == '__main__':
                     break
         else:
             # Running as command 'dns', create/update service
-            create_service(args, args.server_ip)
+            create_service(args)
             
     except Exception as e:
         logging.error(f"An error occurred: {e}")
