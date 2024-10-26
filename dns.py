@@ -5,13 +5,33 @@ import socket
 import argparse
 import requests
 import subprocess
+import threading
+import logging
 from pathlib import Path
 from dnslib import DNSRecord, DNSHeader, RR, A, QTYPE, DNSError
 from socketserver import ThreadingUDPServer, ThreadingTCPServer, BaseRequestHandler
 
+# Global constants
 INSTALL_DIR = "/opt/dns"
 SERVICE_NAME = "custom-dns"
 SERVICE_FILE = f"/etc/systemd/system/{SERVICE_NAME}.service"
+LOG_FILE = "/var/log/custom-dns.log"
+ERROR_LOG_FILE = "/var/log/custom-dns.error.log"
+
+def setup_logging():
+    """Set up logging configuration"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler()
+        ]
+    )
+    # Set up error logging
+    error_handler = logging.FileHandler(ERROR_LOG_FILE)
+    error_handler.setLevel(logging.ERROR)
+    logging.getLogger().addHandler(error_handler)
 
 def get_public_ip():
     """Get public IP address using ipconfig.io"""
@@ -20,8 +40,8 @@ def get_public_ip():
         if response.status_code == 200:
             return response.text.strip()
     except Exception as e:
-        print(f"Error getting public IP: {e}")
-        print("Falling back to local IP detection...")
+        logging.error(f"Error getting public IP: {e}")
+        logging.info("Falling back to local IP detection...")
     
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -30,25 +50,25 @@ def get_public_ip():
         s.close()
         return local_ip
     except Exception as e:
-        print(f"Error getting local IP: {e}")
+        logging.error(f"Error getting local IP: {e}")
         sys.exit(1)
 
 def remove_existing_service():
     """Remove existing DNS service if it exists"""
     try:
         if os.path.exists(SERVICE_FILE):
-            print("Removing existing service...")
+            logging.info("Removing existing service...")
             subprocess.run(["systemctl", "stop", SERVICE_NAME], check=True)
             subprocess.run(["systemctl", "disable", SERVICE_NAME], check=True)
             os.remove(SERVICE_FILE)
             subprocess.run(["systemctl", "daemon-reload"], check=True)
-            print("Existing service removed successfully")
+            logging.info("Existing service removed successfully")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Error removing existing service: {e}")
+        logging.error(f"Error removing existing service: {e}")
         return False
     except Exception as e:
-        print(f"Error: {e}")
+        logging.error(f"Error: {e}")
         return False
 
 def create_service(args, server_ip):
@@ -58,11 +78,17 @@ Description=Custom DNS Server
 After=network.target
 
 [Service]
-ExecStart={sys.executable} {os.path.join(INSTALL_DIR, 'dns.py')} --port {args.port} --whitelist-file {os.path.join(INSTALL_DIR, args.whitelist_file)} --forward-dns "{args.forward_dns}"
+ExecStart=/usr/bin/python3 {os.path.join(INSTALL_DIR, 'dns.py')} --port {args.port} --whitelist-file {args.whitelist_file} --forward-dns "{args.forward_dns}"
 Type=simple
-Restart=always
+Restart=on-failure
+RestartSec=5
 WorkingDirectory={INSTALL_DIR}
 User=root
+StandardOutput=append:{LOG_FILE}
+StandardError=append:{ERROR_LOG_FILE}
+LimitNOFILE=65535
+TimeoutStartSec=0
+RemainAfterExit=no
 
 [Install]
 WantedBy=multi-user.target
@@ -74,12 +100,12 @@ WantedBy=multi-user.target
             return False
 
         # Create new service file
-        print("Creating new service...")
+        logging.info("Creating new service...")
         with open(SERVICE_FILE, 'w') as f:
             f.write(service_content)
 
         # Start new service
-        print("Starting new service...")
+        logging.info("Starting new service...")
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "enable", SERVICE_NAME], check=True)
         subprocess.run(["systemctl", "start", SERVICE_NAME], check=True)
@@ -93,10 +119,13 @@ WantedBy=multi-user.target
         print(f"  systemctl stop {SERVICE_NAME}")
         print(f"  systemctl start {SERVICE_NAME}")
         print(f"  journalctl -u {SERVICE_NAME} -f")
+        print("\nService logs are available at:")
+        print(f"  {LOG_FILE}")
+        print(f"  {ERROR_LOG_FILE}")
         
         return True
     except Exception as e:
-        print(f"Error creating service: {e}")
+        logging.error(f"Error creating service: {e}")
         return False
 
 class DNSHandler:
@@ -119,7 +148,7 @@ class DNSHandler:
                 return self.forward_request(self.data)
 
         except DNSError as err:
-            print(f"DNS Error: {err}")
+            logging.error(f"DNS Error: {err}")
             return None
 
     def is_whitelisted(self, domain):
@@ -143,7 +172,7 @@ class DNSHandler:
         for question in packet.questions:
             requested_domain_name = question.get_qname()
             reply_packet.add_answer(RR(requested_domain_name, rdata=A(self.server_ip), ttl=60))
-            print(f"Whitelist Request: {requested_domain_name.idna()} --> {self.server_ip}")
+            logging.info(f"Whitelist Request: {requested_domain_name.idna()} --> {self.server_ip}")
         return reply_packet.pack()
 
     def forward_request(self, data):
@@ -153,10 +182,10 @@ class DNSHandler:
                 sock.settimeout(5)
                 sock.sendto(data, (dns_server.strip(), 53))
                 response, _ = sock.recvfrom(1024)
-                print(f"Forwarded Request: {DNSRecord.parse(data).questions[0].qname} --> {dns_server}")
+                logging.info(f"Forwarded Request: {DNSRecord.parse(data).questions[0].qname} --> {dns_server}")
                 return response
             except socket.error as e:
-                print(f"Error forwarding to {dns_server}: {e}")
+                logging.error(f"Error forwarding to {dns_server}: {e}")
             finally:
                 sock.close()
         return None
@@ -180,17 +209,12 @@ class TCPHandler(BaseRequestHandler):
         if response:
             self.request.sendall(len(response).to_bytes(2, byteorder='big') + response)
 
-def run_server(server_class, handler_class):
-    server = server_class(("0.0.0.0", args.port), handler_class)
-    print(f"Starting {server_class.__name__} on port {args.port}...")
-    server.serve_forever()
-
 def read_whitelist(filename):
     try:
         with open(filename, 'r') as f:
             return [line.strip() for line in f if line.strip() and not line.startswith('#')]
     except Exception as e:
-        print(f"Error reading whitelist file: {e}")
+        logging.error(f"Error reading whitelist file: {e}")
         sys.exit(1)
 
 if __name__ == '__main__':
@@ -205,37 +229,54 @@ if __name__ == '__main__':
         print("This script must be run as root (sudo)")
         sys.exit(1)
 
+    # Set up logging
+    setup_logging()
+
     # Get public IP
     args.server_ip = get_public_ip()
 
     try:
-        # Check if running as a direct command
-        if os.path.basename(sys.argv[0]) == 'dns' or os.path.basename(sys.argv[0]) == 'dns.py':
-            create_service(args, args.server_ip)
-        else:
-            # Running as a service
+        # Check if script is being run directly by systemd
+        if os.getenv('INVOCATION_ID') is not None:
             args.whitelist = read_whitelist(args.whitelist_file)
-            print(f"Starting DNS Server...")
-            print(f"Server IP: {args.server_ip}")
-            print(f"Port: {args.port}")
-            print(f"Forward DNS: {args.forward_dns}")
-            print(f"Whitelist entries: {len(args.whitelist)}")
+            logging.info(f"Starting DNS Server in service mode...")
+            logging.info(f"Server IP: {args.server_ip}")
+            logging.info(f"Port: {args.port}")
+            logging.info(f"Forward DNS: {args.forward_dns}")
+            logging.info(f"Whitelist entries: {len(args.whitelist)}")
             
-            udp_server = ThreadingUDPServer(("0.0.0.0", args.port), UDPHandler)
-            tcp_server = ThreadingTCPServer(("0.0.0.0", args.port), TCPHandler)
+            try:
+                udp_server = ThreadingUDPServer(("0.0.0.0", args.port), UDPHandler)
+                tcp_server = ThreadingTCPServer(("0.0.0.0", args.port), TCPHandler)
+            except Exception as e:
+                logging.error(f"Failed to bind to port {args.port}: {e}")
+                sys.exit(1)
             
-            import threading
             udp_thread = threading.Thread(target=udp_server.serve_forever)
             tcp_thread = threading.Thread(target=tcp_server.serve_forever)
+            
+            udp_thread.daemon = True
+            tcp_thread.daemon = True
             
             udp_thread.start()
             tcp_thread.start()
             
-            udp_thread.join()
-            tcp_thread.join()
+            logging.info("DNS Server started successfully")
             
-    except KeyboardInterrupt:
-        print("\nShutting down the server...")
+            # Keep the main thread alive
+            while True:
+                try:
+                    udp_thread.join(1)
+                    tcp_thread.join(1)
+                except KeyboardInterrupt:
+                    logging.info("Shutting down the server...")
+                    udp_server.shutdown()
+                    tcp_server.shutdown()
+                    break
+        else:
+            # Running as command 'dns', create/update service
+            create_service(args, args.server_ip)
+            
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logging.error(f"An error occurred: {e}")
         sys.exit(1)
